@@ -455,7 +455,6 @@ def _tool_status_via_sqlite() -> dict:
         "total_drawers": total,
         "wings": wings,
         "rooms": rooms,
-        "palace_path": _config.palace_path,
         "protocol": PALACE_PROTOCOL,
         "aaak_dialect": AAAK_SPEC,
         "vector_disabled": True,
@@ -494,7 +493,6 @@ def tool_status():
         "total_drawers": count,
         "wings": wings,
         "rooms": rooms,
-        "palace_path": _config.palace_path,
         "protocol": PALACE_PROTOCOL,
         "aaak_dialect": AAAK_SPEC,
     }
