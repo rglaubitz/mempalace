@@ -134,6 +134,11 @@ def _hybrid_rank(
       themselves. Since the absolute scale is unbounded, BM25 is min-max
       normalized within the candidate set so weights are commensurable.
 
+    Candidates with ``distance=None`` are treated as vector-unknown
+    (no vector signal available) and scored on BM25 contribution alone.
+    Used by candidate-union mode to merge BM25-only candidates that the
+    vector index didn't surface.
+
     Mutates each result dict to add ``bm25_score`` and reorders the list
     in place. Returns the same list for convenience.
     """
@@ -147,7 +152,11 @@ def _hybrid_rank(
 
     scored = []
     for r, raw, norm in zip(results, bm25_raw, bm25_norm):
-        vec_sim = max(0.0, 1.0 - r.get("distance", 1.0))
+        distance = r.get("distance")
+        if distance is None:
+            vec_sim = 0.0
+        else:
+            vec_sim = max(0.0, 1.0 - distance)
         r["bm25_score"] = round(raw, 3)
         scored.append((vector_weight * vec_sim + bm25_weight * norm, r))
 
@@ -545,6 +554,79 @@ def _bm25_only_via_sqlite(
     }
 
 
+def _merge_bm25_union_candidates(
+    hits: list,
+    query: str,
+    palace_path: str,
+    wing: str,
+    room: str,
+    n_results: int,
+) -> None:
+    """Append top-K BM25-only candidates from sqlite into ``hits`` in place.
+
+    Used by ``search_memories(..., candidate_strategy="union")`` to widen
+    the rerank pool's *source* (not just its size) — vector-only candidate
+    selection skips docs whose embeddings are far from the query even when
+    BM25 signal is strong. We dedupe against existing hits by ``source_file``
+    so vector-side entries (which carry real distance values) win on
+    collisions; BM25-only additions are marked with ``distance=None`` so
+    ``_hybrid_rank`` scores them on BM25 contribution alone.
+    """
+    try:
+        bm25_extra = _bm25_only_via_sqlite(
+            query,
+            palace_path,
+            wing=wing,
+            room=room,
+            n_results=n_results * 3,
+        ).get("results", [])
+    except Exception:
+        logger.debug("candidate_strategy=union: BM25 fetch failed", exc_info=True)
+        return
+
+    seen_sources = {h.get("source_file") for h in hits}
+    for bh in bm25_extra:
+        key = bh.get("source_file")
+        if not key or key == "?" or key in seen_sources:
+            continue
+        bh["distance"] = None
+        bh["effective_distance"] = None
+        bh["closet_boost"] = 0.0
+        hits.append(bh)
+        seen_sources.add(key)
+
+
+# Strategy dispatch — keeps search_memories' branch count under the
+# project's complexity ceiling (C901 max-complexity=25). New strategies
+# register here.
+_CANDIDATE_MERGERS = {
+    "vector": None,  # default no-op
+    "union": _merge_bm25_union_candidates,
+}
+
+
+def _apply_candidate_strategy(
+    strategy: str,
+    hits: list,
+    query: str,
+    palace_path: str,
+    wing: str,
+    room: str,
+    n_results: int,
+) -> None:
+    """Dispatch to the registered merger for ``strategy``.
+
+    Raises ``ValueError`` for unknown strategies. ``"vector"`` is a no-op.
+    """
+    if strategy not in _CANDIDATE_MERGERS:
+        raise ValueError(
+            f"candidate_strategy must be one of {tuple(_CANDIDATE_MERGERS)}, " f"got {strategy!r}"
+        )
+    merger = _CANDIDATE_MERGERS[strategy]
+    if merger is not None:
+        merger(hits, query, palace_path, wing, room, n_results)
+
+
 def search_memories(
     query: str,
     palace_path: str,
@@ -553,6 +635,7 @@ def search_memories(
     n_results: int = 5,
     max_distance: float = 0.0,
     vector_disabled: bool = False,
+    candidate_strategy: str = "vector",
 ) -> dict:
     """Programmatic search — returns a dict instead of printing.
 
@@ -572,6 +655,20 @@ def search_memories(
             (#1222). Set by the MCP server when the HNSW capacity probe
             detects a divergence that would segfault chromadb on segment
             load.
+        candidate_strategy: How candidates for the hybrid re-rank are gathered.
+
+            * ``"vector"`` (default) — preserves historical behavior: top
+              ``n_results * 3`` rows from the vector index are the rerank pool.
+              Cheap; works well when query and target docs agree in the
+              embedding space.
+            * ``"union"`` — also pull top ``n_results * 3`` BM25 candidates
+              from the sqlite FTS5 index and merge them into the rerank pool
+              (deduped by source_file). Catches docs with strong BM25 signal
+              that are vector-distant from the query (e.g. terminology guides
+              looked up by narrative-shaped queries; policy clauses surfaced
+              by scenario descriptions). Adds one sqlite open + FTS5 MATCH
+              per query; perf cost is small but unmeasured at corpus scale.
+              Opt in until the cost is characterized.
     """
     if vector_disabled:
         return _bm25_only_via_sqlite(
@@ -747,6 +844,11 @@ def search_memories(
         h["text"] = expanded
         h["drawer_index"] = best_idx
         h["total_drawers"] = len(ordered_docs)
+
+    # Candidate strategy hook: optionally widen the rerank pool's *source*
+    # before ranking. Default ("vector") is a no-op; "union" merges top-K
+    # BM25 candidates from sqlite. See `_apply_candidate_strategy`.
+    _apply_candidate_strategy(candidate_strategy, hits, query, palace_path, wing, room, n_results)
 
     # BM25 hybrid re-rank within the final candidate set.
     hits = _hybrid_rank(hits, query)
