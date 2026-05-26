@@ -47,9 +47,9 @@ import json  # noqa: E402
 import logging  # noqa: E402
 import hashlib  # noqa: E402
 import time  # noqa: E402
-from datetime import datetime  # noqa: E402
+from datetime import date, datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Optional  # noqa: E402
+from typing import Any, Optional  # noqa: E402
 
 from .config import (  # noqa: E402
     MempalaceConfig,
@@ -60,6 +60,11 @@ from .config import (  # noqa: E402
 from .version import __version__  # noqa: E402
 from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: E402
 
+from .drawer_metadata import (  # noqa: E402
+    DRAWER_METADATA_FIELD,
+    decode_drawer_metadata,
+    encode_drawer_metadata,
+)
 from .backends.chroma import (  # noqa: E402
     ChromaBackend,
     ChromaCollection,
@@ -279,7 +284,30 @@ def _get_collection(create=False):
     global _collection_cache, _metadata_cache, _metadata_cache_time
     try:
         client = _get_client()
+        # ChromaDB 1.x persists the EF *identity* (its ``name()``) with the
+        # collection but not the EF *instance/configuration*. So a reader or
+        # writer that omits ``embedding_function=`` silently gets chromadb's
+        # built-in ``DefaultEmbeddingFunction`` — its ``name()`` matches the
+        # one we spoof in ``mempalace.embedding`` (both report ``"default"``,
+        # the identity check passes), but the *provider list* is chromadb's
+        # default rather than the user's resolved device. On bleeding-edge
+        # interpreters (#1299: python 3.14 + chromadb 1.5.x on Apple Silicon)
+        # that default provider selection can SIGSEGV the host process on
+        # first ``col.add()``. The miner / Stop hook ingest path avoids this
+        # because it routes through ``ChromaBackend.get_collection``, which
+        # resolves the EF via ``ChromaBackend._resolve_embedding_function``;
+        # the MCP server bypassed that abstraction. Resolve the EF inside the
+        # branches that actually open a collection so warm-cache reads stay
+        # zero-cost. Reuse the backend helper so the two call sites can't
+        # drift on logging semantics. If resolution fails, fail closed instead
+        # of reopening ChromaDB's default embedding-function path.
         if create:
+            ef = ChromaBackend._resolve_embedding_function()
+            if ef is None:
+                raise RuntimeError(
+                    "ChromaBackend._resolve_embedding_function must return a non-None EF"
+                )
+            ef_kwargs = {"embedding_function": ef}
             # hnsw:num_threads=1 disables ChromaDB's multi-threaded ParallelFor
             # HNSW insert path, which has a race in repairConnectionsForUpdate /
             # addPoint (see issues #974, #965). Set via metadata on fresh
@@ -293,7 +321,7 @@ def _get_collection(create=False):
             # below skips the metadata-comparison codepath for existing
             # collections, mirroring the backend-layer fix from #1262.
             try:
-                raw = client.get_collection(_config.collection_name)
+                raw = client.get_collection(_config.collection_name, **ef_kwargs)
             except _ChromaNotFoundError:
                 raw = client.create_collection(
                     _config.collection_name,
@@ -302,13 +330,20 @@ def _get_collection(create=False):
                         "hnsw:num_threads": 1,
                         **_HNSW_BLOAT_GUARD,
                     },
+                    **ef_kwargs,
                 )
             _pin_hnsw_threads(raw)
             _collection_cache = ChromaCollection(raw)
             _metadata_cache = None
             _metadata_cache_time = 0
         elif _collection_cache is None:
-            raw = client.get_collection(_config.collection_name)
+            ef = ChromaBackend._resolve_embedding_function()
+            if ef is None:
+                raise RuntimeError(
+                    "ChromaBackend._resolve_embedding_function must return a non-None EF"
+                )
+            ef_kwargs = {"embedding_function": ef}
+            raw = client.get_collection(_config.collection_name, **ef_kwargs)
             _pin_hnsw_threads(raw)
             _collection_cache = ChromaCollection(raw)
             _metadata_cache = None
@@ -434,7 +469,6 @@ def _tool_status_via_sqlite() -> dict:
         "total_drawers": total,
         "wings": wings,
         "rooms": rooms,
-        "palace_path": _config.palace_path,
         "protocol": PALACE_PROTOCOL,
         "aaak_dialect": AAAK_SPEC,
         "vector_disabled": True,
@@ -473,7 +507,6 @@ def tool_status():
         "total_drawers": count,
         "wings": wings,
         "rooms": rooms,
-        "palace_path": _config.palace_path,
         "protocol": PALACE_PROTOCOL,
         "aaak_dialect": AAAK_SPEC,
     }
@@ -792,7 +825,12 @@ def tool_follow_tunnels(wing: str, room: str):
 
 
 def tool_add_drawer(
-    wing: str, room: str, content: str, source_file: str = None, added_by: str = "mcp"
+    wing: str,
+    room: str,
+    content: str,
+    source_file: str = None,
+    added_by: str = "mcp",
+    metadata: Optional[dict[str, Any]] = None,
 ):
     """File verbatim content into a wing/room. Checks for duplicates first."""
     global _metadata_cache
@@ -800,7 +838,8 @@ def tool_add_drawer(
         wing = sanitize_name(wing, "wing")
         room = sanitize_name(room, "room")
         content = sanitize_content(content)
-    except ValueError as e:
+        metadata_json = encode_drawer_metadata(metadata)
+    except (TypeError, ValueError) as e:
         return {"success": False, "error": str(e)}
 
     col = _get_collection(create=True)
@@ -832,19 +871,20 @@ def tool_add_drawer(
         pass
 
     try:
+        drawer_metadata = {
+            "wing": wing,
+            "room": room,
+            "source_file": source_file or "",
+            "chunk_index": 0,
+            "added_by": added_by,
+            "filed_at": datetime.now().isoformat(),
+        }
+        if metadata_json is not None:
+            drawer_metadata[DRAWER_METADATA_FIELD] = metadata_json
         col.upsert(
             ids=[drawer_id],
             documents=[content],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "source_file": source_file or "",
-                    "chunk_index": 0,
-                    "added_by": added_by,
-                    "filed_at": datetime.now().isoformat(),
-                }
-            ],
+            metadatas=[drawer_metadata],
         )
         _metadata_cache = None
         logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
@@ -895,12 +935,21 @@ def tool_get_drawer(drawer_id: str):
             return {"error": f"Drawer not found: {drawer_id}"}
         meta = result["metadatas"][0]
         doc = result["documents"][0]
+        # Keep system fields as top-level siblings and reserve
+        # ``metadata`` for the decoded caller-owned payload, matching
+        # searcher.search_memories().
+        safe_meta = dict(meta) if meta else {}
+        source_file = safe_meta.get("source_file") or ""
         return {
             "drawer_id": drawer_id,
             "content": doc,
-            "wing": meta.get("wing", ""),
-            "room": meta.get("room", ""),
-            "metadata": meta,
+            "wing": safe_meta.get("wing", ""),
+            "room": safe_meta.get("room", ""),
+            "source_file": Path(source_file).name if source_file else "",
+            "chunk_index": safe_meta.get("chunk_index"),
+            "added_by": safe_meta.get("added_by"),
+            "filed_at": safe_meta.get("filed_at"),
+            "metadata": decode_drawer_metadata(safe_meta.get(DRAWER_METADATA_FIELD)),
         }
     except Exception as e:
         return {"error": str(e)}
@@ -1042,9 +1091,26 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
 
 
 def tool_kg_add(
-    subject: str, predicate: str, object: str, valid_from: str = None, source_closet: str = None
+    subject: str,
+    predicate: str,
+    object: str,
+    valid_from: str = None,
+    valid_to: str = None,
+    source_closet: str = None,
+    source_file: str = None,
+    source_drawer_id: str = None,
 ):
-    """Add a relationship to the knowledge graph."""
+    """Add a relationship to the knowledge graph.
+
+    All temporal and provenance fields are optional. ``valid_to`` lets callers
+    backfill historical facts with a known end date in a single call (instead
+    of a separate ``kg_invalidate``). ``source_file`` and ``source_drawer_id``
+    are RFC 002 provenance fields populated by adapters / bulk importers.
+
+    TODO(#1283): once the ISO-8601 validation PR lands, wire ``validate_iso_date``
+    over ``valid_from`` / ``valid_to`` here so malformed dates fail fast at the
+    MCP boundary instead of silently producing empty query results.
+    """
     try:
         subject = sanitize_kg_value(subject, "subject")
         predicate = sanitize_name(predicate, "predicate")
@@ -1059,32 +1125,56 @@ def tool_kg_add(
             "predicate": predicate,
             "object": object,
             "valid_from": valid_from,
+            "valid_to": valid_to,
             "source_closet": source_closet,
+            "source_file": source_file,
+            "source_drawer_id": source_drawer_id,
         },
     )
     triple_id = _kg.add_triple(
-        subject, predicate, object, valid_from=valid_from, source_closet=source_closet
+        subject,
+        predicate,
+        object,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        source_closet=source_closet,
+        source_file=source_file,
+        source_drawer_id=source_drawer_id,
     )
     return {"success": True, "triple_id": triple_id, "fact": f"{subject} → {predicate} → {object}"}
 
 
 def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = None):
-    """Mark a fact as no longer true (set end date)."""
+    """Mark a fact as no longer true (set end date).
+
+    Returns the actual ``ended`` date that was stored — when the caller omits
+    ``ended``, the underlying graph stamps ``date.today()``, and the response
+    reflects that resolved value (instead of the literal string ``"today"``)
+    so callers can verify what was persisted.
+
+    TODO(#1283): apply ``validate_iso_date`` to ``ended`` once that PR lands.
+    """
     try:
         subject = sanitize_kg_value(subject, "subject")
         predicate = sanitize_name(predicate, "predicate")
         object = sanitize_kg_value(object, "object")
     except ValueError as e:
         return {"success": False, "error": str(e)}
+    resolved_ended = ended or date.today().isoformat()
     _wal_log(
         "kg_invalidate",
-        {"subject": subject, "predicate": predicate, "object": object, "ended": ended},
+        {
+            "subject": subject,
+            "predicate": predicate,
+            "object": object,
+            "ended": resolved_ended,
+        },
     )
-    _kg.invalidate(subject, predicate, object, ended=ended)
+    _kg.invalidate(subject, predicate, object, ended=resolved_ended)
     return {
         "success": True,
         "fact": f"{subject} → {predicate} → {object}",
-        "ended": ended or "today",
+        "ended": resolved_ended,
     }
 
 
@@ -1114,9 +1204,13 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
 
     This is the agent's personal journal — observations, thoughts,
     what it worked on, what it noticed, what it thinks matters.
+
+    Note: ``agent_name`` is normalized to lowercase before storage so
+    that diary reads are case-insensitive (see #1243). "Claude",
+    "claude", and "CLAUDE" all resolve to the same agent.
     """
     try:
-        agent_name = sanitize_name(agent_name, "agent_name")
+        agent_name = sanitize_name(agent_name, "agent_name").lower()
         entry = sanitize_content(entry)
         topic = sanitize_name(topic, "topic")
     except ValueError as e:
@@ -1125,7 +1219,7 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
     if wing:
         wing = sanitize_name(wing)
     else:
-        wing = f"wing_{agent_name.lower().replace(' ', '_')}"
+        wing = f"wing_{agent_name.replace(' ', '_')}"
     room = "diary"
     col = _get_collection(create=True)
     if not col:
@@ -1190,9 +1284,14 @@ def tool_diary_read(agent_name: str, last_n: int = 10, wing: str = ""):
     written to. Diary writes from hooks land in project-derived wings
     (``wing_<project>``), so requiring a specific wing on read would
     silo those entries from agent-initiated reads.
+
+    Note: ``agent_name`` is normalized to lowercase before filtering so
+    that reads are case-insensitive (see #1243). Entries written under
+    pre-fix mixed-case agent names will not match the lowercase filter;
+    use ``mempalace repair`` to migrate legacy data if needed.
     """
     try:
-        agent_name = sanitize_name(agent_name, "agent_name")
+        agent_name = sanitize_name(agent_name, "agent_name").lower()
         if wing:
             wing = sanitize_name(wing)
     except ValueError as e:
@@ -1421,7 +1520,7 @@ TOOLS = {
         "handler": tool_kg_query,
     },
     "mempalace_kg_add": {
-        "description": "Add a fact to the knowledge graph. Subject → predicate → object with optional time window. E.g. ('Max', 'started_school', 'Year 7', valid_from='2026-09-01').",
+        "description": "Add a fact to the knowledge graph. Subject → predicate → object with optional time window. E.g. ('Max', 'started_school', 'Year 7', valid_from='2026-09-01'). Pass valid_to to backfill an already-ended historical fact in a single call.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1435,9 +1534,21 @@ TOOLS = {
                     "type": "string",
                     "description": "When this became true (YYYY-MM-DD, optional)",
                 },
+                "valid_to": {
+                    "type": "string",
+                    "description": "When this stopped being true (YYYY-MM-DD, optional). Use for backfilling already-ended historical facts.",
+                },
                 "source_closet": {
                     "type": "string",
                     "description": "Closet ID where this fact appears (optional)",
+                },
+                "source_file": {
+                    "type": "string",
+                    "description": "Source file path the fact was extracted from (optional)",
+                },
+                "source_drawer_id": {
+                    "type": "string",
+                    "description": "Drawer ID the fact was extracted from (optional, RFC 002 provenance)",
                 },
             },
             "required": ["subject", "predicate", "object"],
@@ -1634,6 +1745,10 @@ TOOLS = {
                 },
                 "source_file": {"type": "string", "description": "Where this came from (optional)"},
                 "added_by": {"type": "string", "description": "Who is filing this (default: mcp)"},
+                "metadata": {
+                    "type": "object",
+                    "description": "Opaque caller metadata to store and return on search hits (optional)",
+                },
             },
             "required": ["wing", "room", "content"],
         },
