@@ -299,10 +299,15 @@ def _get_collection(create=False):
         # the MCP server bypassed that abstraction. Resolve the EF inside the
         # branches that actually open a collection so warm-cache reads stay
         # zero-cost. Reuse the backend helper so the two call sites can't
-        # drift on logging or fallback semantics.
+        # drift on logging semantics. If resolution fails, fail closed instead
+        # of reopening ChromaDB's default embedding-function path.
         if create:
             ef = ChromaBackend._resolve_embedding_function()
-            ef_kwargs = {"embedding_function": ef} if ef is not None else {}
+            if ef is None:
+                raise RuntimeError(
+                    "ChromaBackend._resolve_embedding_function must return a non-None EF"
+                )
+            ef_kwargs = {"embedding_function": ef}
             # hnsw:num_threads=1 disables ChromaDB's multi-threaded ParallelFor
             # HNSW insert path, which has a race in repairConnectionsForUpdate /
             # addPoint (see issues #974, #965). Set via metadata on fresh
@@ -333,7 +338,11 @@ def _get_collection(create=False):
             _metadata_cache_time = 0
         elif _collection_cache is None:
             ef = ChromaBackend._resolve_embedding_function()
-            ef_kwargs = {"embedding_function": ef} if ef is not None else {}
+            if ef is None:
+                raise RuntimeError(
+                    "ChromaBackend._resolve_embedding_function must return a non-None EF"
+                )
+            ef_kwargs = {"embedding_function": ef}
             raw = client.get_collection(_config.collection_name, **ef_kwargs)
             _pin_hnsw_threads(raw)
             _collection_cache = ChromaCollection(raw)

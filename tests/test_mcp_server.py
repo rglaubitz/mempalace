@@ -1284,3 +1284,20 @@ class TestCacheInvalidation:
         for kwargs in captured["get"]:
             assert "embedding_function" in kwargs
             assert kwargs["embedding_function"] is not None
+
+        # If EF resolution fails, _get_collection must fail closed instead of
+        # omitting embedding_function= and reopening Chroma's default-EF path.
+        def _resolve_none():
+            return None
+
+        def _fail_if_reopened_without_ef(self, name, **kwargs):
+            captured["get"].append(dict(kwargs))
+            return real_get(self, name, **kwargs)
+
+        monkeypatch.setattr(mcp_server.ChromaBackend, "_resolve_embedding_function", _resolve_none)
+        monkeypatch.setattr(client_cls, "get_collection", _fail_if_reopened_without_ef)
+        mcp_server._collection_cache = None
+        captured["get"].clear()
+
+        assert mcp_server._get_collection() is None
+        assert captured["get"] == []

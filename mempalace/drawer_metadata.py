@@ -1,9 +1,12 @@
 """Opaque drawer metadata passthrough helpers."""
 
 import json
+import logging
 from typing import Any, Optional
 
 DRAWER_METADATA_FIELD = "metadata"
+
+logger = logging.getLogger("mempalace_mcp")
 
 
 def encode_drawer_metadata(metadata: Optional[dict[str, Any]]) -> Optional[str]:
@@ -26,5 +29,15 @@ def decode_drawer_metadata(value: Any) -> Optional[dict[str, Any]]:
     try:
         decoded = json.loads(value)
     except (TypeError, ValueError):
+        logger.warning(
+            "Failed to decode drawer metadata JSON",
+            extra={"value_head": value[:80]},
+        )
         return None
-    return decoded if isinstance(decoded, dict) else None
+    if not isinstance(decoded, dict):
+        logger.warning(
+            "Decoded drawer metadata was not a JSON object",
+            extra={"value_head": value[:80]},
+        )
+        return None
+    return decoded
