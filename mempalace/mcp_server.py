@@ -62,6 +62,7 @@ from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: E402
 
 from .drawer_metadata import (  # noqa: E402
     DRAWER_METADATA_FIELD,
+    decode_drawer_metadata,
     encode_drawer_metadata,
 )
 from .backends.chroma import (  # noqa: E402
@@ -925,21 +926,21 @@ def tool_get_drawer(drawer_id: str):
             return {"error": f"Drawer not found: {drawer_id}"}
         meta = result["metadatas"][0]
         doc = result["documents"][0]
-        # source_file is the absolute filesystem path written by the
-        # miners. Reduce to its basename before handing it to the MCP
-        # client — same threat model as the palace_path leak fix:
-        # nested-agent / multi-server topologies treat the client as a
-        # separate trust domain. Basename preserves citation utility.
-        # Mirrors the searcher.search_memories() return shape.
+        # Keep system fields as top-level siblings and reserve
+        # ``metadata`` for the decoded caller-owned payload, matching
+        # searcher.search_memories().
         safe_meta = dict(meta) if meta else {}
-        if safe_meta.get("source_file"):
-            safe_meta["source_file"] = Path(safe_meta["source_file"]).name
+        source_file = safe_meta.get("source_file") or ""
         return {
             "drawer_id": drawer_id,
             "content": doc,
             "wing": safe_meta.get("wing", ""),
             "room": safe_meta.get("room", ""),
-            "metadata": safe_meta,
+            "source_file": Path(source_file).name if source_file else "",
+            "chunk_index": safe_meta.get("chunk_index"),
+            "added_by": safe_meta.get("added_by"),
+            "filed_at": safe_meta.get("filed_at"),
+            "metadata": decode_drawer_metadata(safe_meta.get(DRAWER_METADATA_FIELD)),
         }
     except Exception as e:
         return {"error": str(e)}

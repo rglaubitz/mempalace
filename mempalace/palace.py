@@ -6,9 +6,13 @@ Consolidates collection access patterns used by both miners and the MCP server.
 
 import contextlib
 import hashlib
+import logging
 import os
 import re
 
+from chromadb.errors import NotFoundError as _ChromaNotFoundError
+
+from .backends.base import PalaceNotFoundError
 from .backends.chroma import ChromaBackend
 
 SKIP_DIRS = {
@@ -38,6 +42,10 @@ SKIP_DIRS = {
 }
 
 _DEFAULT_BACKEND = ChromaBackend()
+_CLOSETS_COLLECTION = "mempalace_closets"
+_LEGACY_CLOSETS_COLLECTION = "mempalace_compressed"
+_legacy_closets_warning_paths: set[str] = set()
+logger = logging.getLogger("mempalace_mcp")
 
 # Schema version for drawer normalization. Bump when the normalization
 # pipeline changes in a way that existing drawers should be rebuilt to pick up
@@ -65,7 +73,41 @@ def get_collection(
 
 def get_closets_collection(palace_path: str, create: bool = True):
     """Get the closets collection — the searchable index layer."""
-    return get_collection(palace_path, collection_name="mempalace_closets", create=create)
+    try:
+        closets = get_collection(palace_path, collection_name=_CLOSETS_COLLECTION, create=False)
+    except (PalaceNotFoundError, _ChromaNotFoundError):
+        closets = None
+
+    if closets is not None and closets.count() > 0:
+        return closets
+
+    try:
+        legacy = get_collection(
+            palace_path,
+            collection_name=_LEGACY_CLOSETS_COLLECTION,
+            create=False,
+        )
+    except (PalaceNotFoundError, _ChromaNotFoundError):
+        legacy = None
+
+    if legacy is not None and legacy.count() > 0:
+        palace_key = os.path.abspath(os.path.expanduser(os.fspath(palace_path)))
+        if palace_key not in _legacy_closets_warning_paths:
+            logger.warning(
+                "Reading deprecated %s collection for %s because %s is absent or empty; "
+                "run a fresh `mempalace compress` to repopulate %s before dropping the old collection.",
+                _LEGACY_CLOSETS_COLLECTION,
+                palace_key,
+                _CLOSETS_COLLECTION,
+                _CLOSETS_COLLECTION,
+            )
+            _legacy_closets_warning_paths.add(palace_key)
+        return legacy
+
+    if closets is not None:
+        return closets
+
+    return get_collection(palace_path, collection_name=_CLOSETS_COLLECTION, create=create)
 
 
 CLOSET_CHAR_LIMIT = 1500  # fill closet until ~1500 chars, then start a new one

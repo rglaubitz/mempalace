@@ -489,6 +489,44 @@ class TestWriteTools:
         search_result = tool_search(query="metadata passthrough round trip", limit=1)
         assert search_result["results"][0]["metadata"] == metadata
 
+    def test_get_drawer_metadata_shape_matches_search(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer, tool_get_drawer, tool_search
+
+        metadata = {
+            "source_class": "agent-specific",
+            "source_system": "audax-apex",
+            "source_type": "test",
+            "sensitivity": "internal",
+            "trust_tier": "raw",
+            "injectable": False,
+            "reference_only": True,
+            "derived_from": ["memory://source/a", "memory://source/b"],
+        }
+        content = "track c shape parity between get drawer and search"
+
+        add_result = tool_add_drawer(
+            wing="w",
+            room="r",
+            content=content,
+            source_file="/tmp/source/parity.md",
+            added_by="track-c-test",
+            metadata=metadata,
+        )
+        assert add_result["success"] is True
+
+        search_result = tool_search(query="shape parity between get drawer and search", limit=1)
+        assert search_result["results"][0]["metadata"] == metadata
+
+        drawer_result = tool_get_drawer(add_result["drawer_id"])
+        assert drawer_result["metadata"] == metadata
+        assert drawer_result["metadata"] == search_result["results"][0]["metadata"]
+        assert drawer_result["source_file"] == "parity.md"
+
     def test_add_drawer_without_metadata_round_trips_none(
         self, monkeypatch, config, palace_path, kg
     ):
@@ -666,7 +704,7 @@ class TestWriteTools:
 
         result = tool_get_drawer("drawer_leak_probe")
         assert result["drawer_id"] == "drawer_leak_probe"
-        assert result["metadata"]["source_file"] == "notes.md"
+        assert result["source_file"] == "notes.md"
         # Defense-in-depth: no field anywhere in the response should
         # contain the absolute path or its parent directory.
         serialized = json.dumps(result)
