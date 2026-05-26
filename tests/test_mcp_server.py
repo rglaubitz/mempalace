@@ -443,6 +443,90 @@ class TestWriteTools:
         assert result["room"] == "test_room"
         assert result["drawer_id"].startswith("drawer_test_wing_test_room_")
 
+    def test_add_drawer_with_metadata_round_trips_to_search(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer, tool_search
+
+        metadata = {
+            "source_class": "agent-specific",
+            "source_system": "audax-apex",
+            "source_type": "test",
+            "sensitivity": "internal",
+            "trust_tier": "raw",
+            "injectable": False,
+            "reference_only": True,
+            "derived_from": ["memory://source/a", "memory://source/b"],
+        }
+        content = "track c metadata passthrough round trip unique drawer"
+
+        add_result = tool_add_drawer(
+            wing="w",
+            room="r",
+            content=content,
+            source_file="memory://test/round-trip",
+            added_by="track-c-test",
+            metadata=metadata,
+        )
+        assert add_result["success"] is True
+
+        stored = col.get(ids=[add_result["drawer_id"]], include=["metadatas"])
+        stored_meta = stored["metadatas"][0]
+        assert set(stored_meta) >= {
+            "wing",
+            "room",
+            "source_file",
+            "chunk_index",
+            "added_by",
+            "filed_at",
+            "metadata",
+        }
+        assert json.loads(stored_meta["metadata"]) == metadata
+
+        search_result = tool_search(query="metadata passthrough round trip", limit=1)
+        assert search_result["results"][0]["metadata"] == metadata
+
+    def test_add_drawer_without_metadata_round_trips_none(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer, tool_search
+
+        content = "track c backwards compatibility drawer without metadata"
+        add_result = tool_add_drawer(wing="w", room="r", content=content)
+        assert add_result["success"] is True
+
+        search_result = tool_search(query="backwards compatibility drawer", limit=1)
+        assert search_result["results"][0]["metadata"] is None
+
+    def test_legacy_drawer_without_metadata_key_searches_with_metadata_none(
+        self, monkeypatch, config, palace_path, collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        collection.add(
+            ids=["drawer_legacy_metadata_passthrough"],
+            documents=["legacy pre migration metadata passthrough drawer"],
+            metadatas=[
+                {
+                    "wing": "legacy",
+                    "room": "pre_migration",
+                    "source_file": "legacy.md",
+                    "chunk_index": 0,
+                    "added_by": "legacy-miner",
+                    "filed_at": "2026-05-26T00:00:00",
+                }
+            ],
+        )
+        from mempalace.mcp_server import tool_search
+
+        search_result = tool_search(query="legacy pre migration metadata passthrough", limit=1)
+        assert search_result["results"][0]["metadata"] is None
+
     def test_add_drawer_duplicate_detection(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
