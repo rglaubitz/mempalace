@@ -49,6 +49,7 @@ import hashlib  # noqa: E402
 import time  # noqa: E402
 from datetime import date, datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
+from typing import Any, Optional  # noqa: E402
 
 from .config import (  # noqa: E402
     MempalaceConfig,
@@ -59,6 +60,10 @@ from .config import (  # noqa: E402
 from .version import __version__  # noqa: E402
 from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: E402
 
+from .drawer_metadata import (  # noqa: E402
+    DRAWER_METADATA_FIELD,
+    encode_drawer_metadata,
+)
 from .backends.chroma import (  # noqa: E402
     ChromaBackend,
     ChromaCollection,
@@ -809,7 +814,12 @@ def tool_follow_tunnels(wing: str, room: str):
 
 
 def tool_add_drawer(
-    wing: str, room: str, content: str, source_file: str = None, added_by: str = "mcp"
+    wing: str,
+    room: str,
+    content: str,
+    source_file: str = None,
+    added_by: str = "mcp",
+    metadata: Optional[dict[str, Any]] = None,
 ):
     """File verbatim content into a wing/room. Checks for duplicates first."""
     global _metadata_cache
@@ -817,7 +827,8 @@ def tool_add_drawer(
         wing = sanitize_name(wing, "wing")
         room = sanitize_name(room, "room")
         content = sanitize_content(content)
-    except ValueError as e:
+        metadata_json = encode_drawer_metadata(metadata)
+    except (TypeError, ValueError) as e:
         return {"success": False, "error": str(e)}
 
     col = _get_collection(create=True)
@@ -849,19 +860,20 @@ def tool_add_drawer(
         pass
 
     try:
+        drawer_metadata = {
+            "wing": wing,
+            "room": room,
+            "source_file": source_file or "",
+            "chunk_index": 0,
+            "added_by": added_by,
+            "filed_at": datetime.now().isoformat(),
+        }
+        if metadata_json is not None:
+            drawer_metadata[DRAWER_METADATA_FIELD] = metadata_json
         col.upsert(
             ids=[drawer_id],
             documents=[content],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "source_file": source_file or "",
-                    "chunk_index": 0,
-                    "added_by": added_by,
-                    "filed_at": datetime.now().isoformat(),
-                }
-            ],
+            metadatas=[drawer_metadata],
         )
         _metadata_cache = None
         logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
@@ -1722,6 +1734,10 @@ TOOLS = {
                 },
                 "source_file": {"type": "string", "description": "Where this came from (optional)"},
                 "added_by": {"type": "string", "description": "Who is filing this (default: mcp)"},
+                "metadata": {
+                    "type": "object",
+                    "description": "Opaque caller metadata to store and return on search hits (optional)",
+                },
             },
             "required": ["wing", "room", "content"],
         },

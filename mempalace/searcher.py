@@ -16,6 +16,7 @@ import re
 import sqlite3
 from pathlib import Path
 
+from .drawer_metadata import DRAWER_METADATA_FIELD, decode_drawer_metadata
 from .palace import get_closets_collection, get_collection
 
 # Closet pointer line format: "topic|entities|→drawer_id_a,drawer_id_b"
@@ -526,6 +527,7 @@ def _bm25_only_via_sqlite(
                 "wing": meta.get("wing", "unknown"),
                 "room": meta.get("room", "unknown"),
                 "source_file": Path(full_source).name if full_source else "?",
+                "metadata": decode_drawer_metadata(meta.get(DRAWER_METADATA_FIELD)),
                 "created_at": meta.get("filed_at", "unknown"),
                 # No vector distance available in BM25-only mode.
                 "similarity": None,
@@ -831,6 +833,7 @@ def search_memories(
             "wing": meta.get("wing", "unknown"),
             "room": meta.get("room", "unknown"),
             "source_file": Path(source).name if source else "?",
+            "metadata": decode_drawer_metadata(meta.get(DRAWER_METADATA_FIELD)),
             "created_at": meta.get("filed_at", "unknown"),
             "similarity": round(max(0.0, 1 - effective_dist), 3),
             "distance": round(dist, 4),
