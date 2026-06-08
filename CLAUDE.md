@@ -1,5 +1,15 @@
 # CLAUDE.md
 
+## Audax Worktree Policy
+
+- The primary checkout for this product is `~/audax/mempalace/`.
+- Durable Codex lanes live under `~/audax/.codex-worktrees/mempalace/<lane>/`.
+- Claude temporary/review lanes live under `~/audax/.claude-worktrees/mempalace/<lane>/`.
+- Do not use `~/.codex/worktrees/` for permanent Audax product work, and do not
+  nest linked worktrees inside the product checkout.
+- Run `git worktree list` before assuming branch ownership, deleting branches,
+  or deciding where another agent is working.
+
 ## The Mission
 
 Memory is identity. When an AI forgets everything between conversations, it cannot build real understanding — of you, your work, your people, your life.
