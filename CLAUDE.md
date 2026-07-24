@@ -1,3 +1,9 @@
+> **[STATUS: RETIRED as apex memory backend] — 2026-07-24.** Audax apex PR #268
+> (Station S6) retired mempalace as the apex memory runtime.
+> **Canonical now:** `~/audax/audax-memory/` (belief layer) +
+> `audax-apex/src/audax_memory` runtime. This repo remains a third-party fork
+> (github.com/MemPalace/mempalace) kept for reference — do not wire new apex work to it.
+
 # CLAUDE.md
 
 ## Audax Worktree Policy
